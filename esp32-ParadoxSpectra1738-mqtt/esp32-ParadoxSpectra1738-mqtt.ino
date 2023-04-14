@@ -1,129 +1,119 @@
-/*
-  WiFiTelnetToSerial - Example Transparent UART to Telnet Server for ESP32
-
-  Copyright (c) 2017 Hristo Gochkov. All rights reserved.
-  This file is part of the ESP32 WiFi library for Arduino environment.
-
-  This library is free software; you can redistribute it and/or
-  modify it under the terms of the GNU Lesser General Public
-  License as published by the Free Software Foundation; either
-  version 2.1 of the License, or (at your option) any later version.
-
-  This library is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public
-  License along with this library; if not, write to the Free Software
-  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
 #include <WiFi.h>
-#include <WiFiMulti.h>
+#include <PubSubClient.h>
 
-WiFiMulti wifiMulti;
+/***************************************
+ *  WiFi
+ **************************************/
+#define WIFI_SSID   "APO"
+#define WIFI_PASSWD "001St3w4rt"
 
-//how many clients should be able to telnet to this ESP32
-#define MAX_SRV_CLIENTS 1
-const char* ssid = "APO";
-const char* password = "001St3w4rt";
+// Add your MQTT Broker IP address, example:
+const char* mqtt_server = "192.168.4.159";
 
-WiFiServer server(23);
-WiFiClient serverClients[MAX_SRV_CLIENTS];
+WiFiClient espClient;
+PubSubClient client(espClient);
+long lastMsg = 0;
+char msg[50];
+int value = 0;
 
-void setup() {
+void setup()
+{
   Serial.begin(115200);
   Serial.println("\nConnecting");
 
-  wifiMulti.addAP(ssid, password);
-  wifiMulti.addAP("ssid_from_AP_2", "your_password_for_AP_2");
-  wifiMulti.addAP("ssid_from_AP_3", "your_password_for_AP_3");
-
-  Serial.println("Connecting Wifi ");
-  for (int loops = 10; loops > 0; loops--) {
-    if (wifiMulti.run() == WL_CONNECTED) {
-      Serial.println("");
-      Serial.print("WiFi connected ");
-      Serial.print("IP address: ");
-      Serial.println(WiFi.localIP());
-      break;
-    }
-    else {
-      Serial.println(loops);
-      delay(1000);
-    }
-  }
-  if (wifiMulti.run() != WL_CONNECTED) {
-    Serial.println("WiFi connect failed");
-    delay(1000);
-    ESP.restart();
+  WiFi.begin(WIFI_SSID, WIFI_PASSWD);
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
   }
 
-  //start UART and the server
+  Serial.println("");
+  Serial.print("WiFi connected ");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());  
+
+  // connect to mqtt broker
+  client.setServer(mqtt_server, 1883);
+
+  //start UART
   Serial2.begin(9600);
-  server.begin();
-  server.setNoDelay(true);
-
-  Serial.print("Ready! Use 'telnet ");
-  Serial.print(WiFi.localIP());
-  Serial.println(" 23' to connect");
 }
 
-void loop() {
-  uint8_t i;
-  if (wifiMulti.run() == WL_CONNECTED) {
-    //check if there are any new clients
-    if (server.hasClient()){
-      for(i = 0; i < MAX_SRV_CLIENTS; i++){
-        //find free/disconnected spot
-        if (!serverClients[i] || !serverClients[i].connected()){
-          if(serverClients[i]) serverClients[i].stop();
-          serverClients[i] = server.available();
-          if (!serverClients[i]) Serial.println("available broken");
-          Serial.print("New client: ");
-          Serial.print(i); Serial.print(' ');
-          Serial.println(serverClients[i].remoteIP());
-          break;
-        }
-      }
-      if (i >= MAX_SRV_CLIENTS) {
-        //no free/disconnected spot so reject
-        server.available().stop();
-      }
-    }
-    //check clients for data
-    for(i = 0; i < MAX_SRV_CLIENTS; i++){
-      if (serverClients[i] && serverClients[i].connected()){
-        if(serverClients[i].available()){
-          //get data from the telnet client and push it to the UART
-          while(serverClients[i].available()) Serial2.write(serverClients[i].read());
-        }
-      }
-      else {
-        if (serverClients[i]) {
-          serverClients[i].stop();
-        }
-      }
-    }
-    //check UART for data
-    if(Serial2.available()){
-      size_t len = Serial2.available();
-      uint8_t sbuf[len];
-      Serial2.readBytes(sbuf, len);
-      //push UART data to all connected telnet clients
-      for(i = 0; i < MAX_SRV_CLIENTS; i++){
-        if (serverClients[i] && serverClients[i].connected()){
-          serverClients[i].write(sbuf, len);
-          delay(1);
-        }
-      }
+void reconnect()
+{
+  // Loop until we're reconnected
+  while (!client.connected())
+  {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (client.connect("ParadoxSpectra1738"))
+    {
+      Serial.println("connected");
+    } 
+    else
+    {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
     }
   }
-  else {
-    Serial.println("WiFi not connected!");
-    for(i = 0; i < MAX_SRV_CLIENTS; i++) {
-      if (serverClients[i]) serverClients[i].stop();
+}
+
+void loop()
+{
+  //  update mqtt broker connection
+  if (!client.connected())
+  {
+    reconnect();
+  }
+
+  client.loop();
+
+  //check UART for data
+  if(Serial2.available() > 3)
+  {
+    size_t len = Serial2.available();
+
+  Serial.print("len: ");
+  Serial.println(len);  
+
+    uint8_t sbuf[4];
+    
+    if(Serial2.readBytes(sbuf, 4))
+    {
+      int EventId = sbuf[0] >> 2;
+      int CategoryId = ((sbuf[0] & 3) << 4) + (sbuf[1] >> 4);
+
+      Serial.print("EventId: ");
+      Serial.println(EventId);  
+
+      Serial.print("CategoryId: ");
+      Serial.println(CategoryId);          
+
+      switch(EventId)
+      {        
+        case 0:
+        {
+          String eventString = "ParadoxSpectra1738/Zone/" + String(CategoryId,DEC);
+          Serial.println(eventString);  
+          client.publish(eventString.c_str(), "OK");
+        }
+        break;
+        
+        case 1:
+        {
+          String eventString = "ParadoxSpectra1738/Zone/" + String(CategoryId,DEC);
+          Serial.println(eventString);
+          client.publish(eventString.c_str(), "OPEN");
+        }
+        break;
+
+        default:
+        break;
+      }
     }
-    delay(1000);
   }
 }
